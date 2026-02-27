@@ -4,16 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 jobs:
 
   build-windows:
     runs-on: windows-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
@@ -27,15 +29,17 @@ jobs:
           pyinstaller --clean --onefile --windowed pynq_manager_gui.py
           ren dist\pynq_manager_gui.exe pynq-manager-windows.exe
 
-      - uses: actions/upload-artifact@v3
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: windows-build
           path: pynq-manager-windows.exe
 
   build-linux:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
@@ -43,12 +47,13 @@ jobs:
           sudo apt install -y python3-pip libfuse2
           pip install pyinstaller pyserial paramiko
 
-      - name: Build Linux binary
+      - name: Build Linux Binary
         run: |
           pyinstaller --clean --onefile pynq_manager_gui.py
           mv dist/pynq_manager_gui pynq-manager-linux
 
-      - uses: actions/upload-artifact@v3
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: linux-build
           path: pynq-manager-linux
@@ -60,18 +65,20 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v3
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
         with:
           name: windows-build
           path: .
 
-      - uses: actions/download-artifact@v3
+      - name: Download Linux Artifact
+        uses: actions/download-artifact@v4
         with:
           name: linux-build
           path: .
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             pynq-manager-windows.exe
