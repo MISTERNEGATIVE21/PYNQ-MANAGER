@@ -4,167 +4,229 @@ import serial
 import serial.tools.list_ports
 import threading
 import time
-import paramiko
-import re
+import sys
 
-BAUDRATE = 115200
+APP_TITLE = "PYNQ Professional Manager"
+DEFAULT_BAUD = 115200
 
-class PynqManager:
+
+class SerialManager:
+    def __init__(self, output_callback):
+        self.ser = None
+        self.running = False
+        self.output_callback = output_callback
+
+    def connect(self, port, baud):
+        try:
+            self.ser = serial.Serial(port, baud, timeout=0.1)
+            self.running = True
+            threading.Thread(target=self.read_loop, daemon=True).start()
+            return True, f"Connected to {port} @ {baud}"
+        except Exception as e:
+            return False, str(e)
+
+    def disconnect(self):
+        self.running = False
+        if self.ser and self.ser.is_open:
+            self.ser.close()
+        return "Disconnected"
+
+    def read_loop(self):
+        while self.running:
+            try:
+                if self.ser and self.ser.in_waiting:
+                    data = self.ser.read(self.ser.in_waiting).decode(errors="ignore")
+                    self.output_callback(data)
+            except:
+                pass
+            time.sleep(0.05)
+
+    def send(self, data):
+        if self.ser and self.ser.is_open:
+            self.ser.write(data.encode())
+
+
+class PynqGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("PYNQ Network Manager")
-        self.root.geometry("750x550")
+        self.root.title(APP_TITLE)
+        self.root.geometry("1000x650")
+        self.root.configure(bg="#0f172a")
 
-        self.create_widgets()
+        self.serial_manager = SerialManager(self.append_output)
+
+        self.mode = tk.StringVar(value="terminal")
+        self.create_ui()
         self.refresh_ports()
 
-    def create_widgets(self):
-        frame = ttk.Frame(self.root)
-        frame.pack(pady=10)
+    # ================= UI ================= #
 
-        ttk.Label(frame, text="COM Port:").grid(row=0, column=0, padx=5)
+    def create_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
 
-        self.port_combo = ttk.Combobox(frame, width=20)
-        self.port_combo.grid(row=0, column=1)
+        style.configure("TButton", padding=6)
+        style.configure("TLabel", padding=4)
 
-        ttk.Button(frame, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=5)
+        # ===== Top Bar =====
+        top_frame = ttk.Frame(self.root)
+        top_frame.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(frame, text="Username:").grid(row=1, column=0)
-        self.username = ttk.Entry(frame)
-        self.username.insert(0, "xilinx")
-        self.username.grid(row=1, column=1)
+        ttk.Label(top_frame, text="COM Port").pack(side="left")
+        self.port_combo = ttk.Combobox(top_frame, width=15)
+        self.port_combo.pack(side="left", padx=5)
 
-        ttk.Label(frame, text="Password:").grid(row=2, column=0)
-        self.password = ttk.Entry(frame, show="*")
-        self.password.insert(0, "xilinx")
-        self.password.grid(row=2, column=1)
+        ttk.Button(top_frame, text="Refresh", command=self.refresh_ports).pack(side="left", padx=5)
 
-        ttk.Button(frame, text="Run Auto Setup", command=self.start_thread).grid(row=3, column=0, columnspan=3, pady=10)
+        ttk.Label(top_frame, text="Baudrate").pack(side="left", padx=10)
+        self.baud_combo = ttk.Combobox(top_frame, width=10)
+        self.baud_combo["values"] = ["9600", "19200", "38400", "57600", "115200", "230400", "460800", "921600"]
+        self.baud_combo.set("115200")
+        self.baud_combo.pack(side="left")
 
-        self.log_area = scrolledtext.ScrolledText(self.root, wrap=tk.WORD)
-        self.log_area.pack(expand=True, fill='both')
+        self.connect_btn = ttk.Button(top_frame, text="Connect", command=self.toggle_connection)
+        self.connect_btn.pack(side="left", padx=10)
 
-    def log(self, text):
-        self.log_area.insert(tk.END, text + "\n")
-        self.log_area.see(tk.END)
+        # ===== Mode Selection =====
+        mode_frame = ttk.LabelFrame(self.root, text="Mode Selection")
+        mode_frame.pack(fill="x", padx=10)
+
+        ttk.Radiobutton(mode_frame, text="Terminal Mode", variable=self.mode, value="terminal").pack(side="left", padx=20)
+        ttk.Radiobutton(mode_frame, text="AutoFlash Network Config", variable=self.mode, value="flash").pack(side="left")
+
+        # ===== Terminal Output =====
+        self.output = scrolledtext.ScrolledText(
+            self.root,
+            bg="#111827",
+            fg="#00ffcc",
+            insertbackground="white",
+            font=("Consolas", 11)
+        )
+        self.output.pack(expand=True, fill="both", padx=10, pady=10)
+
+        # ===== Command Entry =====
+        cmd_frame = ttk.Frame(self.root)
+        cmd_frame.pack(fill="x", padx=10)
+
+        self.cmd_entry = ttk.Entry(cmd_frame)
+        self.cmd_entry.pack(side="left", fill="x", expand=True)
+        self.cmd_entry.bind("<Return>", lambda e: self.send_terminal())
+
+        ttk.Button(cmd_frame, text="Send", command=self.send_terminal).pack(side="left", padx=5)
+
+        # ===== Flash Config Panel =====
+        flash_frame = ttk.LabelFrame(self.root, text="Network Configuration")
+        flash_frame.pack(fill="x", padx=10, pady=5)
+
+        ttk.Label(flash_frame, text="Interface").grid(row=0, column=0, padx=5, pady=5)
+        self.iface_entry = ttk.Entry(flash_frame)
+        self.iface_entry.insert(0, "eth0")
+        self.iface_entry.grid(row=0, column=1)
+
+        self.ip_mode = tk.StringVar(value="dhcp")
+        ttk.Radiobutton(flash_frame, text="DHCP", variable=self.ip_mode, value="dhcp").grid(row=0, column=2)
+        ttk.Radiobutton(flash_frame, text="Static", variable=self.ip_mode, value="static").grid(row=0, column=3)
+
+        ttk.Label(flash_frame, text="Static IP").grid(row=1, column=0)
+        self.static_ip = ttk.Entry(flash_frame)
+        self.static_ip.grid(row=1, column=1)
+
+        ttk.Label(flash_frame, text="Gateway").grid(row=1, column=2)
+        self.gateway = ttk.Entry(flash_frame)
+        self.gateway.grid(row=1, column=3)
+
+        ttk.Button(flash_frame, text="Flash Config", command=self.auto_flash).grid(row=2, column=0, columnspan=4, pady=8)
+
+    # ================= Serial ================= #
 
     def refresh_ports(self):
-        ports = [port.device for port in serial.tools.list_ports.comports()]
-        self.port_combo['values'] = ports
+        ports = [p.device for p in serial.tools.list_ports.comports()]
+        self.port_combo["values"] = ports
         if ports:
             self.port_combo.current(0)
 
-    def start_thread(self):
-        thread = threading.Thread(target=self.run_setup)
-        thread.start()
+    def toggle_connection(self):
+        if self.serial_manager.running:
+            msg = self.serial_manager.disconnect()
+            self.connect_btn.config(text="Connect")
+            self.append_output("\n" + msg + "\n")
+        else:
+            port = self.port_combo.get()
 
-    def expect_login(self, ser, username, password):
-        buffer = ""
-        start_time = time.time()
-
-        while time.time() - start_time < 20:
-            if ser.in_waiting:
-                data = ser.read(ser.in_waiting).decode(errors='ignore')
-                buffer += data
-                self.log(data.strip())
-
-                if "login:" in buffer:
-                    ser.write((username + "\n").encode())
-                    buffer = ""
-
-                elif "Password:" in buffer:
-                    ser.write((password + "\n").encode())
-                    buffer = ""
-
-                elif "$" in buffer or "#" in buffer:
-                    return True
-            time.sleep(0.5)
-        return False
-
-    def run_setup(self):
-        port = self.port_combo.get()
-        username = self.username.get()
-        password = self.password.get()
-
-        if not port:
-            messagebox.showerror("Error", "No COM port selected")
-            return
-
-        try:
-            self.log("[*] Connecting to serial...")
-            ser = serial.Serial(port, BAUDRATE, timeout=1)
-            time.sleep(2)
-
-            logged_in = self.expect_login(ser, username, password)
-
-            if not logged_in:
-                self.log("[!] Login failed")
+            if not port:
+                messagebox.showerror("Error", "Select COM port")
                 return
 
-            self.log("[*] Setting DHCP...")
+            if self.mode.get() == "flash":
+                baud = DEFAULT_BAUD  # Force 115200
+                self.baud_combo.set("115200")
+            else:
+                baud = int(self.baud_combo.get())
 
-            dhcp_script = """sudo bash -c 'cat > /etc/network/interfaces <<EOF
+            success, msg = self.serial_manager.connect(port, baud)
+
+            if success:
+                self.connect_btn.config(text="Disconnect")
+            else:
+                messagebox.showerror("Connection Error", msg)
+
+            self.append_output(msg + "\n")
+
+    def append_output(self, text):
+        self.output.insert(tk.END, text)
+        self.output.see(tk.END)
+
+    # ================= Terminal ================= #
+
+    def send_terminal(self):
+        if self.mode.get() != "terminal":
+            return
+
+        cmd = self.cmd_entry.get()
+        if cmd.strip():
+            self.serial_manager.send(cmd + "\n")
+            self.cmd_entry.delete(0, tk.END)
+
+    # ================= AutoFlash ================= #
+
+    def auto_flash(self):
+        if self.mode.get() != "flash":
+            messagebox.showinfo("Info", "Switch to AutoFlash Mode")
+            return
+
+        iface = self.iface_entry.get()
+
+        if self.ip_mode.get() == "dhcp":
+            config = f"""sudo bash -c 'cat > /etc/network/interfaces <<EOF
 auto lo
 iface lo inet loopback
 
-auto eth0
-allow-hotplug eth0
-iface eth0 inet dhcp
+auto {iface}
+iface {iface} inet dhcp
+EOF'"""
+        else:
+            ip = self.static_ip.get()
+            gw = self.gateway.get()
+
+            if not ip or not gw:
+                messagebox.showerror("Error", "Enter Static IP and Gateway")
+                return
+
+            config = f"""sudo bash -c 'cat > /etc/network/interfaces <<EOF
+auto lo
+iface lo inet loopback
+
+auto {iface}
+iface {iface} inet static
+    address {ip}
+    gateway {gw}
 EOF'"""
 
-            ser.write((dhcp_script + "\n").encode())
-            time.sleep(2)
-            ser.write((password + "\n").encode())
-            time.sleep(2)
-
-            ser.write(b"sudo systemctl restart networking || sudo service networking restart\n")
-            time.sleep(5)
-
-            ser.write(b"ip -4 addr show eth0\n")
-            time.sleep(3)
-
-            output = ser.read_all().decode(errors="ignore")
-            self.log(output)
-
-            ip_match = re.search(r'\b\d+\.\d+\.\d+\.\d+\b', output)
-
-            if ip_match:
-                ip_addr = ip_match.group()
-                self.log(f"[+] IP detected: {ip_addr}")
-                ser.close()
-                self.ssh_fallback(ip_addr, username, password)
-            else:
-                self.log("[!] No IP detected")
-
-        except Exception as e:
-            self.log(str(e))
-
-    def ssh_fallback(self, ip, username, password):
-        self.log("[*] Switching to SSH...")
-
-        try:
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(ip, username=username, password=password, timeout=10)
-
-            self.log("[+] SSH Connected")
-
-            stdin, stdout, stderr = ssh.exec_command("sudo apt update -y")
-            stdout.channel.recv_exit_status()
-            self.log(stdout.read().decode())
-
-            stdin, stdout, stderr = ssh.exec_command("sudo apt upgrade -y")
-            stdout.channel.recv_exit_status()
-            self.log(stdout.read().decode())
-
-            ssh.close()
-            self.log("[✔] Setup Complete")
-
-        except Exception as e:
-            self.log(f"[!] SSH failed: {e}")
+        self.serial_manager.send(config + "\n")
+        self.append_output("\nNetwork configuration flashed.\n")
 
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = PynqManager(root)
+    app = PynqGUI(root)
     root.mainloop()
