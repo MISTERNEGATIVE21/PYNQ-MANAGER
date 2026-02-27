@@ -10,12 +10,13 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
+    outputs:
+      artifact-name: windows-build
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
@@ -27,16 +28,19 @@ jobs:
       - name: Build Windows EXE
         run: |
           pyinstaller --clean --onefile --windowed pynq_manager_gui.py
-          ren dist\pynq_manager_gui.exe pynq-manager-windows.exe
+          mkdir release
+          move dist\pynq_manager_gui.exe release\pynq-manager-windows.exe
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-build
-          path: pynq-manager-windows.exe
+          path: release/
 
   build-linux:
     runs-on: ubuntu-latest
+    outputs:
+      artifact-name: linux-build
 
     steps:
       - uses: actions/checkout@v4
@@ -44,19 +48,20 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3-pip libfuse2
+          sudo apt install -y python3-pip
           pip install pyinstaller pyserial paramiko
 
       - name: Build Linux Binary
         run: |
           pyinstaller --clean --onefile pynq_manager_gui.py
-          mv dist/pynq_manager_gui pynq-manager-linux
+          mkdir release
+          mv dist/pynq_manager_gui release/pynq-manager-linux
 
       - name: Upload Linux Artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-build
-          path: pynq-manager-linux
+          path: release/
 
   release:
     needs: [build-windows, build-linux]
@@ -69,19 +74,20 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: windows-build
-          path: .
+          path: ./release
 
       - name: Download Linux Artifact
         uses: actions/download-artifact@v4
         with:
           name: linux-build
-          path: .
+          path: ./release
+
+      - name: Show downloaded files
+        run: ls -R ./release
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            pynq-manager-windows.exe
-            pynq-manager-linux
+          files: ./release/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
